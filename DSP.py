@@ -19,13 +19,16 @@ class Wave:
 	def amplitudes(self): # trả về mảng biên độ của tín hiệu
 		return self.data
 
-	def STE(self, N = 0.025): # tính STE
+	def STE(self, data = None, N = 0.025): # tính STE
+		if data is None:
+			data = self.data
+
 		N = N * self.Fs
 		step = int(N // 4)
-		E = np.zeros(len(self.data) + 1)
+		E = np.zeros(len(data) + 1)
 
-		for i in range(1, len(self.data) + 1):
-			E[i] = E[i - 1] + self.data[i - 1]**2
+		for i in range(1, len(data) + 1):
+			E[i] = E[i - 1] + data[i - 1]**2
 
 		ste = []
 		t = [] # thời gian tương ứng với các giá trị STE
@@ -63,12 +66,12 @@ class Wave:
 				tmpSi.append(i)
 			else:
 				if len(tmpSi) != 0 and t[tmpSi[-1]] - t[tmpSi[0]] + timeStep >= minLenSilent or isFirstSilentRegion == True:
-					silent.append(tmpSi)
+					silent.append(np.array(tmpSi))
 				isFirstSilentRegion = False
 				tmpSi = []
 
-		if len(silent) != 0 and t[tmpSi[-1]] - t[tmpSi[0]] + timeStep >= minLenSilent:
-			silent.append(tmpSi)
+		if len(tmpSi) > 0:
+			silent.append(np.array(tmpSi))
 
 		if len(silent) > 0: # tách khoảng tiếng nói
 			pre = 0
@@ -76,8 +79,12 @@ class Wave:
 				for j in range(pre, silent[i][0]):
 					speech.append(j)
 				pre = silent[i][-1]
-		for i in range(silent[-1][-1], len(ste)):
-			speech.append(i)
+
+		if len(silent) > 0:
+			for i in range(silent[-1][-1], len(ste)):
+				speech.append(i)
+
+		speech = np.array(speech)
 
 		return [silent, speech]
 
@@ -102,6 +109,9 @@ class Wave:
 		for i in speech:
 			if ste[i] > Tmin and ste[i] < Tmax:
 				g.append(ste[j])
+
+		f = np.array(f)
+		g = np.array(g)
 
 		return [f, g, Tmin, Tmax]
 
@@ -135,7 +145,29 @@ class Wave:
 
 		return Tmid
 
-	def SpeechSilentDiscrimination(self):
+	def SpeechSilentDiscrimination(self, N = 0.025):
+		step = int(N * self.Fs // 4)
+		T = self.STEThreshold();
+		f, g = self.DetectSpeechSilent(T)
+
+		f = [i * step for i in f]
+
+		g = [g * step for i in g]
+
+		silent = []
+		speech = []
+		for i in f:
+			silent.append(self.data[i[0]: i[-1] + 1])
+		
+		if len(f) > 0:
+			pre = f[0][-1] + 1
+			for i in range(1, len(f)):
+				speech.append(self.data[pre: f[i][0]])
+				pre = f[i][-1]
+
+		return [silent, speech]
+
+	def PlotSpeechSilentDiscrimination(self):
 		n = self.times
 		T = self.STEThreshold();
 		f, g = self.DetectSpeechSilent(T)
@@ -167,10 +199,95 @@ class Wave:
 
 		plt.show()
 
+	def ZCR(self, data, N = 0.025): # hàm tính ZCR
+		N = N * self.Fs
+		step = int(N // 4)
+
+		sign = np.zeros(len(data) + 1)
+
+		for i in range(1, len(data) + 1):
+			sign[i] = 1 if data[i - 1] >= 0 else -1
+
+		tmp = np.zeros(len(data) + 1)
+		for i in range(1, len(data) + 1):
+			tmp[i] = abs(sign[i] - sign[i - 1])
+
+		for i in range(1, len(data) + 1):
+			tmp[i] = tmp[i - 1] + tmp[i]
+
+		zcr = []
+		n = []
+		for i in range(1, len(tmp), step):
+			start = int(i - N//2 + 1) # vị trí bắt đầu của khung
+			end = int(i + N//2) # vị trí kết thúc của khung
+
+			zcr.append(tmp[min(end, len(tmp) - 1)] - tmp[max(1, start) - 1])
+			n.append((i - 1)/self.Fs)
+
+		return [np.array(n), np.array(zcr)]
+
+	def PlotZCR(self, data):
+		t = np.arange(0, len(data)/self.Fs, 1/self.Fs)
+		n, zcr = self.ZCR(data = data)
+		plt.plot(t, data/max(data), '#2b80ffe0')
+		plt.plot(n, zcr, '#ff0000')
+		plt.show()
+
+	def g(self, f): # hàm chuẩn hóa
+		fmin = min(f)
+		fmax = max(f)
+		T = (fmin + fmax)/3
+		res = [(i - T)/(fmax - T) if i >= T else (i - T)/(T - fmin) for i in f]
+		return np.array(res)
+
+	def VU(self, data):
+
+		nzcr, zcr = self.ZCR(data = data)
+		nste, ste = self.STE(data = data)
+
+		zcr = self.g(zcr)
+		ste = self.g(ste)
+
+		vu = np.array([1 if ste[i] - zcr[i] >= 0 else 0 for i in range(len(ste))])
+
+		N = 20
+
+		tmp = np.zeros(len(vu) + 1)
+		for i in range(1, len(vu) + 1):
+			tmp[i] = tmp[i - 1] + vu[i - 1]
+
+		sta = np.zeros(len(vu))
+		for i in range(0, len(vu)):
+			sta[i] = (tmp[min(i + N//2, len(tmp) - 2) + 1] - tmp[max(0, i - N//2) + 1])/N
+
+		vu = np.array([1 if sta[i] >= 0.5 else 0 for i in range(len(sta))])
+		return [nste, vu]
+
+	def PlotVU(self, data):
+		n, vu = self.VU(data)
+
+		t = np.arange(0, len(data)/self.Fs, 1/self.Fs)
+		plt.plot(t, data/max(data), '#2b80ffe0')
+		plt.plot(n, vu, '#ff0000')
+		plt.show()
+
 
 def main():
-	wave = Wave()
-	wave.SpeechSilentDiscrimination()
+	name = ['44.1kHz.wav', '44.1kHz_female.wav', 'lab_female.wav', 'lab_male.wav', 'phone_female.wav', 'phone_male.wav', 'studio_female.wav', 'studio_male.wav']
+	for i in name:
+		key = input()
+		if key == "no":
+			break
+		print(i)
+		wave = Wave(i)
+		wave.PlotSpeechSilentDiscrimination()
+		# silent, speech = wave.SpeechSilentDiscrimination()
+		# for j in speech:
+		# 	key = input()
+		# 	if key == "no":
+		# 		break
+		# 	wave.PlotZCR(data = j)
+		# 	wave.PlotSpeechSilentDiscrimination()
 
 if __name__ == '__main__':
 	main()
